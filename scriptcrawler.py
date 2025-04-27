@@ -1,55 +1,107 @@
 import requests
-import threading
-import time
-import json
 import random
+import json
+import time
+import re
+from bs4 import BeautifulSoup
+from proxy_scraper import get_proxies, get_random_proxy
+
+# Load config
+with open('config.json') as f:
+    config = json.load(f)
+
+BOT_TOKEN = config["BOT_TOKEN"]
+CHAT_ID = config["CHAT_ID"]
+SLEEP_MINUTES = config["SLEEP_MINUTES"]
 
 # Load keywords
-with open('keywords.json', 'r') as f:
-    keywords_data = json.load(f)
-KEYWORDS = keywords_data['games']
+with open('keywords.json') as f:
+    keywords = json.load(f)["games"]
 
-def get_random_keywords(n=5):
-    """Ambil n random keywords"""
-    return random.sample(KEYWORDS, n)
-
-def scrape_links(keyword):
-    """Scrape function dummy (ganti dengan scrape site sesungguhnya)"""
+def send_telegram(message):
     try:
-        print(f"[Scraping] Keyword: {keyword}")
-        # simulasi scraping
-        time.sleep(1)  # fake delay scraping
-        print(f"[Success] Fetched data for: {keyword}")
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        data = {
+            "chat_id": CHAT_ID,
+            "text": message
+        }
+        requests.post(url, data=data)
     except Exception as e:
-        print(f"[Error] {keyword} - {str(e)}")
+        print(f"[Telegram] Error: {e}")
 
-def scrape_cycle():
-    keywords_to_use = get_random_keywords(10)
-    threads = []
+def google_search(keyword, proxy):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        proxies = {
+            "http": f"http://{proxy}",
+            "https": f"http://{proxy}"
+        }
+        params = {
+            "q": f"site:pastebin.com OR site:rentry.co OR site:ghostbin.com {keyword}",
+            "num": "10"
+        }
+        response = requests.get("https://www.google.com/search", headers=headers, params=params, proxies=proxies, timeout=10)
+        soup = BeautifulSoup(response.text, "html.parser")
+        links = []
+        for g in soup.find_all('a'):
+            href = g.get('href')
+            if href and ('pastebin.com' in href or 'rentry.co' in href or 'ghostbin.com' in href):
+                clean_link = re.findall(r"https?://[^\s&]+", href)
+                if clean_link:
+                    links.append(clean_link[0])
+        return list(set(links))
+    except Exception as e:
+        print(f"[Search] Error with proxy {proxy}: {e}")
+        return []
 
-    print(f"[+] Selected keywords this cycle: {keywords_to_use}")
+def scrape_paste(url, proxy=None):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        proxies = {
+            "http": f"http://{proxy}",
+            "https": f"http://{proxy}"
+        } if proxy else None
 
-    # Auto log keywords
-    with open('keyword_log.txt', 'a') as log_file:
-        for keyword in keywords_to_use:
-            log_file.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {keyword}\n")
-
-    # Create thread per keyword
-    for keyword in keywords_to_use:
-        t = threading.Thread(target=scrape_links, args=(keyword,))
-        t.start()
-        threads.append(t)
-
-    # Wait semua thread selesai
-    for t in threads:
-        t.join()
+        response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
+        if response.status_code == 200:
+            matches = re.findall(r"[\w\.-]+:[\w\.-]+", response.text)
+            return matches
+        else:
+            return []
+    except Exception as e:
+        print(f"[Scrape] Error fetching {url}: {e}")
+        return []
 
 def main():
+    proxies = get_proxies()
     while True:
-        print("[*] Starting scrape cycle...")
-        scrape_cycle()
-        print("[*] Sleeping for 15 minutes...\n")
-        time.sleep(900)  # 15 menit
+        all_found = []
+        print(f"[+] Starting cycle with {len(proxies)} proxies...")
+
+        for keyword in keywords:
+            proxy = get_random_proxy(proxies)
+            links = google_search(keyword, proxy)
+            print(f"[+] Found {len(links)} links for keyword: {keyword}")
+
+            for link in links:
+                combos = scrape_paste(link, proxy)
+                if combos:
+                    print(f"[LIVE] {link} - Found {len(combos)} combos")
+                    all_found.extend(combos)
+                    for combo in combos:
+                        send_telegram(combo)
+
+        if all_found:
+            with open("found_combos.txt", "a") as f:
+                for combo in all_found:
+                    f.write(combo + "\n")
+
+            print(f"[+] Total combos saved: {len(all_found)}")
+        else:
+            print("[i] No new combos this cycle.")
+
+        print(f"[i] Sleeping {SLEEP_MINUTES} minutes...")
+        time.sleep(SLEEP_MINUTES * 60)
 
 if __name__ == "__main__":
     main()
